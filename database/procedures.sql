@@ -448,11 +448,12 @@ proc_body: BEGIN
                 SET MESSAGE_TEXT = 'Validation Error: Quantity must be a positive integer.';
         END IF;
 
-        -- Check available inventory
+        -- Check available inventory with PESSIMISTIC LOCKING
         SELECT COALESCE(quantity_on_hand - quantity_reserved, 0)
           INTO v_available_qty
           FROM inventory
-         WHERE product_id = v_product_id AND warehouse_id = v_warehouse_id;
+         WHERE product_id = v_product_id AND warehouse_id = v_warehouse_id
+           FOR UPDATE;
 
         IF v_available_qty IS NULL OR v_available_qty < CAST(v_quantity AS SIGNED) THEN
             SIGNAL SQLSTATE '45000'

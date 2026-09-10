@@ -29,52 +29,21 @@ class SalesOrderService {
 
     const connection = await pool.getConnection();
     try {
-      await connection.beginTransaction();
-
-      // Validation of stock removed to allow backordering / negative stock
-
-      // Calculate totals
-      let subtotal = 0;
-      for (const item of data.items) {
-        subtotal += item.quantity * item.unit_price * (1 - (item.discount_pct || 0) / 100);
-      }
-      const discountAmount = parseFloat(data.discount_amount) || 0;
-      const taxAmount = parseFloat(data.tax_amount) || (subtotal - discountAmount) * 0.18;
-      const grandTotal = subtotal - discountAmount + taxAmount;
-
-      // Create order
-      const { id: soId, so_number } = await salesOrderRepository.create(
-        {
-          ...data,
-          subtotal,
-          discount_amount: discountAmount,
-          tax_amount: taxAmount,
-          grand_total: grandTotal,
-          created_by: userId
-        },
-        connection
+      // Call the stored procedure: CALL CreateSalesOrder(customer_id, items_json, created_by, @out_so_id)
+      const [results] = await connection.execute(
+        'CALL CreateSalesOrder(?, ?, ?, @p_so_id)',
+        [data.customer_id, JSON.stringify(data.items), userId]
       );
-
-      // Create items and reserve stock
-      for (const item of data.items) {
-        await salesOrderRepository.createItem({ so_id: soId, ...item }, connection);
-        // Reserve stock (upsert if inventory record doesn't exist)
-        const [res] = await connection.execute(
-          'UPDATE inventory SET quantity_reserved = quantity_reserved + ? WHERE product_id = ? AND warehouse_id = (SELECT warehouse_id FROM warehouses WHERE is_active = TRUE LIMIT 1)',
-          [item.quantity, item.product_id]
-        );
-        if (res.affectedRows === 0) {
-          await connection.execute(
-            'INSERT INTO inventory (product_id, warehouse_id, quantity_on_hand, quantity_reserved) SELECT ?, warehouse_id, 0, ? FROM warehouses WHERE is_active = TRUE LIMIT 1',
-            [item.product_id, item.quantity]
-          );
-        }
-      }
-
-      await connection.commit();
-      return await this.getById(soId);
+      
+      // Fetch the OUT parameter (the newly created sales order ID)
+      const [[{ so_id }]] = await connection.execute('SELECT @p_so_id AS so_id');
+      
+      return await this.getById(so_id);
     } catch (error) {
-      await connection.rollback();
+      // If the stored procedure threw a SIGNAL SQLSTATE, it will be caught here
+      if (error.sqlState === '45000') {
+        throw ApiError.badRequest(error.message);
+      }
       throw error;
     } finally {
       connection.release();
